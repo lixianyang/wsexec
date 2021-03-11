@@ -2,6 +2,7 @@ package wsexec
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/klog/v2"
 )
 
 type Server struct {
@@ -21,6 +21,9 @@ type Server struct {
 	pingTimeout  time.Duration
 	closeTimeout time.Duration
 	sync.Mutex   // write lock
+	logger       Logger
+	debugInput   io.Writer
+	debugOutput  io.Writer
 }
 
 type ServerOption func(s *Server)
@@ -43,10 +46,29 @@ func WithServerCloseTimeout(d time.Duration) ServerOption {
 	}
 }
 
+func WithServerLogger(logger Logger) ServerOption {
+	return func(s *Server) {
+		s.logger = logger
+	}
+}
+
+func WithServerDebugInput(writer io.Writer) ServerOption {
+	return func(s *Server) {
+		s.debugInput = writer
+	}
+}
+
+func WithServerDebugOutput(writer io.Writer) ServerOption {
+	return func(s *Server) {
+		s.debugOutput = writer
+	}
+}
+
 func NewServer(conn *websocket.Conn, options ...ServerOption) *Server {
 	defaultPingInterval := 10 * time.Second
 	defaultPingTimeout := 5 * time.Second
 	defaultCloseTimeout := 5 * time.Second
+	defaultLogger := discardLogger{}
 
 	s := &Server{
 		conn:         conn,
@@ -55,6 +77,7 @@ func NewServer(conn *websocket.Conn, options ...ServerOption) *Server {
 		pingInterval: defaultPingInterval,
 		pingTimeout:  defaultPingTimeout,
 		closeTimeout: defaultCloseTimeout,
+		logger:       defaultLogger,
 	}
 
 	for _, opt := range options {
@@ -66,81 +89,81 @@ func NewServer(conn *websocket.Conn, options ...ServerOption) *Server {
 	return s
 }
 
-func (ws *Server) Close(err error) {
-	klog.V(2).Infoln("close with err=", err)
-	ws.doneChan <- err
+func (s *Server) Close(err error) {
+	s.logger.Println("close with err=", err)
+	s.doneChan <- err
 }
 
-func (ws *Server) Keepalive() {
-	defer ws.conn.Close()
+func (s *Server) Keepalive() {
+	defer s.conn.Close()
 
 	var err error
 	for {
 		select {
-		case <-ws.ticker.C:
-			klog.V(2).Infoln("keepalive goroutine send ping message")
-			if err = ws.Ping(); err != nil {
-				klog.V(2).Infoln("keepalive goroutine returned with ping err ", err)
+		case <-s.ticker.C:
+			s.logger.Println("keepalive goroutine send ping message")
+			if err = s.Ping(); err != nil {
+				s.logger.Println("keepalive goroutine returned with ping err ", err)
 				return
 			}
-		case err = <-ws.doneChan:
-			klog.V(2).Infoln("keepalive goroutine returned with done err=", err)
-			ws.sendCloseMessageIfNeeded(err)
+		case err = <-s.doneChan:
+			s.logger.Println("keepalive goroutine returned with done err=", err)
+			s.sendCloseMessageIfNeeded(err)
 			return
 		}
 	}
 }
 
-func (ws *Server) sendCloseMessageIfNeeded(err error) {
+func (s *Server) sendCloseMessageIfNeeded(err error) {
 	if err == nil {
 		return
 	}
 
 	if e, ok := err.(*websocket.CloseError); ok {
-		klog.V(2).Infoln("needn't send close message with websocket close error code %d message %s", e.Code, e.Text)
+		s.logger.Printfln("needn't send close message with websocket close error code %d message %s", e.Code, e.Text)
 		return
 	}
 
-	klog.V(2).Infoln("send close message with err ", err)
+	s.logger.Println("send close message with err ", err)
 	closeMessage := websocket.FormatCloseMessage(websocket.CloseNormalClosure, err.Error())
-	ws.Lock()
-	defer ws.Unlock()
-	if e := ws.conn.WriteControl(websocket.CloseMessage, closeMessage, time.Now().Add(ws.closeTimeout)); e != nil {
-		klog.V(2).Infoln("send close message with write control err ", e)
+	s.Lock()
+	defer s.Unlock()
+	if e := s.conn.WriteControl(websocket.CloseMessage, closeMessage, time.Now().Add(s.closeTimeout)); e != nil {
+		s.logger.Println("send close message with write control err ", e)
 	}
 
 	return
 }
 
-func (ws *Server) Ping() error {
-	ws.Lock()
-	defer ws.Unlock()
+func (s *Server) Ping() error {
+	s.Lock()
+	defer s.Unlock()
 
-	return ws.conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(ws.pingTimeout))
+	return s.conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(s.pingTimeout))
 }
 
-func (ws *Server) Read(p []byte) (n int, err error) {
+func (s *Server) Read(p []byte) (n int, err error) {
 	var t int
 	var data []byte
 	for {
-		t, data, err = ws.conn.ReadMessage()
+		t, data, err = s.conn.ReadMessage()
 		if err != nil {
 			break
 		}
 
 		if isTerminalSizeChangeType(t) {
-			klog.V(2).Infoln("read terminal size change message: %s", string(data))
+			s.logger.Println("read terminal size change message: ", string(data))
 			size := remotecommand.TerminalSize{}
 			if err = unmarshalTerminalSize(data, &size); err != nil {
-				klog.V(2).Infoln("unmarshal terminal size message err ", err)
+				s.logger.Println("unmarshal terminal size message err ", err)
 				break
 			}
-			ws.resizeChan <- size
+			s.resizeChan <- size
 			continue
 		}
 
 		if isDataType(t) {
-			klog.V(0).Infof("read data: %+q", data)
+			s.recordInput(data)
 			n = copy(p, data)
 			break
 		}
@@ -153,44 +176,56 @@ func (ws *Server) Read(p []byte) (n int, err error) {
 	}
 
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-		klog.V(2).Infoln("silence websocket normal close")
+		s.logger.Println("silence websocket normal close")
 		err = io.EOF
 	} else if errors.Is(err, net.ErrClosed) {
-		klog.V(2).Infoln("silence ", net.ErrClosed)
+		s.logger.Println("silence ", net.ErrClosed)
 		err = io.EOF
 	} else {
 		if e, ok := err.(*websocket.CloseError); ok {
-			klog.V(2).Infoln("silence websocket close error with code: %d message: %s", e.Code, e.Text)
+			s.logger.Printfln("silence websocket close error with code: %d message: %s", e.Code, e.Text)
 			err = io.EOF
 		}
-		klog.V(2).Infoln("cleanup remote session with ", EndOfTransmission, "(EOT)")
+		s.logger.Println("cleanup remote session with ", EndOfTransmission, "(EOT)")
 		n = copy(p, EndOfTransmission)
 	}
 
 	if err == io.EOF {
-		ws.doneChan <- nil
+		s.doneChan <- nil
 	} else {
-		ws.doneChan <- err
+		s.doneChan <- err
 	}
 
 	return
 }
 
-func (ws *Server) Write(p []byte) (n int, err error) {
-	ws.Lock()
-	defer ws.Unlock()
+func (s *Server) Write(p []byte) (n int, err error) {
+	s.Lock()
+	defer s.Unlock()
 
-	if err = ws.conn.WriteMessage(websocket.BinaryMessage, p); err != nil {
-		klog.V(2).Infoln("write err ", err)
+	if err = s.conn.WriteMessage(websocket.BinaryMessage, p); err != nil {
+		s.logger.Println("write err ", err)
 	}
 
-	klog.V(0).Infof("write data: %+q", p)
+	s.recordOutput(p)
 	return len(p), err
 }
 
-func (ws *Server) Next() *remotecommand.TerminalSize {
+func (s *Server) Next() *remotecommand.TerminalSize {
 	select {
-	case size := <-ws.resizeChan:
+	case size := <-s.resizeChan:
 		return &size
+	}
+}
+
+func (s *Server) recordInput(data []byte) {
+	if s.debugInput != nil {
+		_, _ = s.debugInput.Write([]byte(fmt.Sprintf("%+q\n", data)))
+	}
+}
+
+func (s *Server) recordOutput(data []byte) {
+	if s.debugOutput != nil {
+		_, _ = s.debugOutput.Write(data)
 	}
 }
