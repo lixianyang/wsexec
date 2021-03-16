@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
+	dockerterm "github.com/docker/docker/pkg/term"
 	"github.com/gorilla/websocket"
 	"k8s.io/kubectl/pkg/util/term"
 )
@@ -41,7 +41,8 @@ func WithClientDebugInput(writer io.Writer) ClientOption {
 }
 
 func NewClient(conn *websocket.Conn, options ...ClientOption) *Client {
-	defaultTTY := term.TTY{In: os.Stdin, Out: os.Stdout, Raw: true}
+	in, out, _ := dockerterm.StdStreams()
+	defaultTTY := term.TTY{In: in, Out: out, Raw: true}
 	defaultLogger := discardLogger{}
 
 	client := &Client{
