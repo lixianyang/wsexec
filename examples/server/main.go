@@ -25,6 +25,7 @@ var (
 )
 
 func init() {
+	// see https://github.com/kubernetes/client-go/blob/master/tools/clientcmd/doc.go
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	// if you want to change the loading rules (which files in which order), you can do so here
 	configOverrides := &clientcmd.ConfigOverrides{}

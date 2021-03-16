@@ -12,9 +12,11 @@ go get github.com/lixianyang/wsexec
 
 ## server
 
-Use https://github.com/kubernetes/client-go/blob/master/tools/clientcmd/doc.go load kubeconfig.
+Change kubeconfig load way if needed.
 
-```shell
+See [examples](examples/server/main.go)
+
+```
 cd example/server
 go mod tidy
 go run main.go
@@ -24,7 +26,9 @@ go run main.go
 
 Change namespace, pod and command before run main.go
 
-```shell
+See [examples](examples/client/main.go)
+
+```
 cd example/client
 go mod tidy
 go run main.go
