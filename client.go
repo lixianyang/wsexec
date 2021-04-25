@@ -7,8 +7,8 @@ import (
 	"io"
 
 	"github.com/gorilla/websocket"
+	"github.com/lixianyang/wsexec/term"
 	dockerterm "github.com/moby/term"
-	"k8s.io/kubectl/pkg/util/term"
 )
 
 type Client struct {
