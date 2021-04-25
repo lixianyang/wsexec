@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	dockerterm "github.com/docker/docker/pkg/term"
 	"github.com/gorilla/websocket"
+	dockerterm "github.com/moby/term"
 	"k8s.io/kubectl/pkg/util/term"
 )
 
